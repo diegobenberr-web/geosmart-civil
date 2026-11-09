@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://diegobenberr-web.github.io/geosmart-civil/sitemap.xml
+Sitemap: https://geosmart-civil.github.io/sitemap.xml
