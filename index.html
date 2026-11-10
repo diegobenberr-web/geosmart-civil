@@ -249,6 +249,7 @@ tr.click{cursor:pointer} tr.click:hover td{background:var(--surface-2)}
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/full.umd.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script src="config.js"></script>
 <script>
@@ -861,7 +862,8 @@ VIEWS.monitoreos = () => {
       <div class="card"><div class="card-head"><h3>Fotografías (${(f.photos || []).length})</h3></div>${upload}
       <div class="gallery" style="margin-top:10px">${(f.photos || []).map(ph => `<button class="ph" data-act="lightbox" data-f="${esc(f.id)}" data-p="${esc(ph.id)}"><img src="${photoSrc(ph)}" alt="${esc(ph.zone)}: ${esc(ph.desc || ph.name)}" loading="lazy"><div style="flex-direction:column;gap:0"><b>${esc(ph.zone)}</b><span class="faint small">${esc(ph.desc || ph.name || "")}</span>${ph.credit ? `<span class="credit" style="margin:2px 0 0">Foto real referencial · ${esc(ph.name || "")}</span>` : ""}</div></button>`).join("") || `<p class="muted small">Aún no hay fotografías en este monitoreo.</p>`}</div></div>`;
   }
-  return `<div class="page-head"><div><h1>Monitoreos con dron</h1><p class="muted">${isTeam() ? "Todos los vuelos de la obra, incluidos los que están en control de calidad." : "Vuelos publicados por el equipo GeoSmart después del control de calidad."} Monitoreo ${used} de ${p.plan?.flights || "—"} del plan contratado.</p></div>${can("flight.edit") ? `<button class="btn primary" data-act="newFlight">${icon("plus")} Nuevo monitoreo</button>` : ""}</div>
+  return `<div class="page-head"><div><h1>Monitoreos con dron</h1><p class="muted">${isTeam() ? "Todos los vuelos de la obra, incluidos los que están en control de calidad." : "Vuelos publicados por el equipo GeoSmart después del control de calidad."} Monitoreo ${used} de ${p.plan?.flights || "—"} del plan contratado.</p></div>${can("flight.edit") ? `<div class="row"><button class="btn primary" data-act="droneImport">${icon("drone")} Conectar dron</button><button class="btn" data-act="newFlight">${icon("plus")} Monitoreo manual</button></div>` : ""}</div>
+  ${liveCard(p)}
   <div style="display:grid;grid-template-columns:minmax(0,260px) minmax(0,1fr);gap:16px" class="mon-grid"><div class="flight-list">${list}</div><div style="display:flex;flex-direction:column;gap:16px;min-width:0">${detail}</div></div>
   <style>@media (max-width:900px){.mon-grid{grid-template-columns:minmax(0,1fr)!important}}</style>`;
 };
@@ -1300,6 +1302,134 @@ function surveyModal(pid, title) {
     <div class="dlg-foot"><button class="btn" type="button" data-act="close">Omitir</button><button class="btn primary" type="submit">Enviar</button></div></form>`);
 }
 
+/* ============ conexión con el dron ============ */
+const DR = { items: [], date: "", busy: false, status: "", shrink: true, zoneAll: "General" };
+const numv = v => { const n = parseFloat(v); return isFinite(n) ? n : null; };
+const isoDay = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const hhmm = d => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+const DJI_CAMS = { "L1D-20c": "DJI Mavic 2 Pro", "L2D-20c": "DJI Mavic 3", FC220: "DJI Mavic Pro", FC6310: "DJI Phantom 4 Pro", FC3170: "DJI Mavic Air 2", FC3411: "DJI Air 2S", FC7303: "DJI Mini 2", FC3582: "DJI Mini 3 Pro" };
+const droneName = (make, model) => DJI_CAMS[model] ? `${DJI_CAMS[model]} (cámara ${model})` : `${make} ${model}`.trim();
+function photoGeo(ph) {
+  if (!ph || ph.lat == null || ph.lng == null) return "";
+  const q = `${(+ph.lat).toFixed(6)},${(+ph.lng).toFixed(6)}`;
+  return `<span class="credit">GPS ${q}${ph.alt != null ? ` · altura ${Math.round(ph.alt)} m` : ""}${ph.taken ? ` · ${esc(String(ph.taken).replace("T", " ").slice(0, 16))}` : ""} · <a href="https://www.google.com/maps?q=${encodeURIComponent(q)}" target="_blank" rel="noopener">Ver en el mapa</a></span>`;
+}
+async function readDroneMeta(file) {
+  let m = {};
+  try { if (window.exifr) m = (await exifr.parse(file, { tiff: true, exif: true, gps: true, xmp: true, mergeOutput: true })) || {}; } catch (e) { m = {}; }
+  let t = m.DateTimeOriginal || m.CreateDate || m.ModifyDate; t = t instanceof Date ? t : t ? new Date(t) : new Date(file.lastModified);
+  if (isNaN(t)) t = new Date(file.lastModified);
+  return { file, name: file.name, taken: t, lat: numv(m.latitude), lng: numv(m.longitude), relAlt: numv(m.RelativeAltitude), absAlt: numv(m.GPSAltitude ?? m.AbsoluteAltitude), make: String(m.Make || "").trim(), model: String(m.Model || "").trim(), exif: !!(m.Make || m.DateTimeOriginal || m.latitude), sel: true, zone: DR.zoneAll };
+}
+function droneSummary() {
+  const its = DR.items.filter(i => isoDay(i.taken) === DR.date), sel = its.filter(i => i.sel), p = proj();
+  if (!its.length) return null;
+  const t0 = its.reduce((a, i) => i.taken < a ? i.taken : a, its[0].taken), t1 = its.reduce((a, i) => i.taken > a ? i.taken : a, its[0].taken);
+  const geo = its.filter(i => i.lat != null && i.lng != null), alts = its.map(i => i.relAlt ?? null).filter(v => v != null);
+  let areaHa = null, center = null, distKm = null;
+  if (geo.length) {
+    const la = geo.map(g => g.lat), lo = geo.map(g => g.lng), mLat = (Math.min(...la) + Math.max(...la)) / 2;
+    const dy = (Math.max(...la) - Math.min(...la)) * 111320, dx = (Math.max(...lo) - Math.min(...lo)) * 111320 * Math.cos(mLat * Math.PI / 180);
+    areaHa = dx * dy / 10000; center = [mLat, (Math.min(...lo) + Math.max(...lo)) / 2];
+    if (p && p.lat && p.lng) { const ddy = (center[0] - p.lat) * 111320, ddx = (center[1] - p.lng) * 111320 * Math.cos(p.lat * Math.PI / 180); distKm = Math.hypot(ddx, ddy) / 1000; }
+  }
+  const drones = [...new Set(its.map(i => droneName(i.make, i.model)).filter(Boolean))];
+  return { its, sel, t0, t1, geo, alt: alts.length ? alts.reduce((a, b) => a + b, 0) / alts.length : null, areaHa, center, distKm, drone: drones.join(", ") };
+}
+function droneScatter(geo) {
+  if (geo.length < 2) return "";
+  const la = geo.map(g => g.lat), lo = geo.map(g => g.lng), a0 = Math.min(...la), a1 = Math.max(...la), o0 = Math.min(...lo), o1 = Math.max(...lo);
+  const W = 520, H = 220, P = 16, sx = v => P + (o1 > o0 ? (v - o0) / (o1 - o0) : .5) * (W - 2 * P), sy = v => H - P - (a1 > a0 ? (v - a0) / (a1 - a0) : .5) * (H - 2 * P);
+  const pts = [...geo].sort((a, b) => a.taken - b.taken);
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Recorrido del dron según el GPS de las fotos" style="background:var(--surface-2);border-radius:8px">
+    <polyline points="${pts.map(g => `${sx(g.lng).toFixed(1)},${sy(g.lat).toFixed(1)}`).join(" ")}" fill="none" stroke="var(--ink-3)" stroke-width="1" stroke-dasharray="3 3"/>
+    ${pts.map(g => `<circle cx="${sx(g.lng).toFixed(1)}" cy="${sy(g.lat).toFixed(1)}" r="${g.sel ? 4 : 2.5}" fill="${g.sel ? "var(--blue)" : "var(--ink-3)"}"/>`).join("")}
+    <text x="${W - P}" y="${P}" text-anchor="end" font-size="11" fill="var(--ink-3)">N ↑ · posición de cada foto</text></svg>`;
+}
+function droneBody() {
+  if (DR.busy) return `<div class="empty">${esc(DR.status || "Leyendo la memoria del dron…")}</div>`;
+  if (!DR.items.length) return DR.status ? `<div class="warnbox">${esc(DR.status)}</div>` : "";
+  const days = [...new Set(DR.items.map(i => isoDay(i.taken)))].sort().reverse();
+  const s = droneSummary(), p = proj(), zones = ["General", ...((p && p.sectors) || []).map(z => z.name)];
+  const zoneOpts = sel => zones.map(z => `<option ${z === sel ? "selected" : ""}>${esc(z)}</option>`).join("");
+  const rows = s.its.slice(0, 200).map(i => { const k = DR.items.indexOf(i); return `<tr><td><input type="checkbox" data-change="drSel" data-k="${k}" ${i.sel ? "checked" : ""} aria-label="Incluir ${esc(i.name)}"></td><td class="mono small">${esc(i.name)}</td><td class="num">${hhmm(i.taken)}</td><td class="num">${i.relAlt != null ? Math.round(i.relAlt) + " m" : "—"}</td><td>${i.lat != null ? "✓" : `<span class="faint">sin GPS</span>`}</td><td><select data-change="drZone" data-k="${k}" aria-label="Zona de ${esc(i.name)}">${zoneOpts(i.zone)}</select></td></tr>`; }).join("");
+  const noExif = s.its.filter(i => !i.exif).length;
+  return `${days.length > 1 ? `<label class="field"><span>Hay fotos de ${days.length} fechas. Elige el vuelo:</span><select data-change="drDate">${days.map(d => `<option value="${d}" ${d === DR.date ? "selected" : ""}>${fmtD(d)} · ${DR.items.filter(i => isoDay(i.taken) === d).length} fotos</option>`).join("")}</select></label>` : ""}
+    <div class="kv3"><div><span>Dron</span>${esc(s.drone || "No indicado en las fotos")}</div><div><span>Fecha</span>${fmtD(DR.date)}</div><div><span>Horario</span>${hhmm(s.t0)} – ${hhmm(s.t1)}</div>
+    <div><span>Fotos</span>${s.its.length} (${s.geo.length} con GPS)</div><div><span>Altura promedio</span>${s.alt != null ? Math.round(s.alt) + " m sobre el despegue" : "—"}</div><div><span>Área recorrida</span>${s.areaHa != null ? s.areaHa.toFixed(1) + " ha aprox." : "—"}</div></div>
+    ${s.distKm != null && s.distKm > 2 ? `<div class="warnbox">El centro del vuelo está a ${s.distKm >= 10 ? Math.round(s.distKm).toLocaleString("es-PE") : s.distKm.toFixed(1)} km de la ubicación registrada de la obra. Revisa que sea la obra correcta.</div>` : s.distKm != null ? `<div class="okbox">El vuelo coincide con la ubicación de la obra (a ${s.distKm < 1 ? Math.round(s.distKm * 1000) + " m" : s.distKm.toFixed(1) + " km"}).</div>` : ""}
+    ${noExif ? `<p class="small muted">${noExif} foto(s) no traen datos del dron; se usó la fecha del archivo.</p>` : ""}
+    ${droneScatter(s.geo.map(g => g))}
+    <div class="row"><label class="field" style="flex:0 1 220px"><span>Asignar todas a la zona</span><select data-change="drZoneAll">${zoneOpts(DR.zoneAll)}</select></label>
+    <label class="check" style="align-self:end"><input type="checkbox" data-change="drShrink" ${DR.shrink ? "checked" : ""}><span>Reducir las fotos a 2048 px antes de subir (recomendado)</span></label></div>
+    <div class="table-wrap" style="max-height:280px;overflow:auto"><table><thead><tr><th></th><th>Foto</th><th>Hora</th><th>Altura</th><th>GPS</th><th>Zona</th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${s.its.length > 200 ? `<p class="small faint">Se muestran las primeras 200 fotos.</p>` : ""}`;
+}
+function droneModal() {
+  openModal(dlgHead("Conectar dron", "Importa un vuelo directamente desde la memoria del dron o su tarjeta microSD.") + `<div class="dlg-body">
+    <ol class="small" style="margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px">
+      <li>Conecta el dron a la computadora con su <b>cable USB</b> y enciéndelo, o inserta su <b>tarjeta microSD</b>. Aparecerá como una memoria.</li>
+      <li>Elige la carpeta <b>DCIM</b> (o la del vuelo) o selecciona solo las fotos.</li>
+      <li>La plataforma lee de cada foto la fecha, la hora, el GPS, la altura y el modelo del dron, y arma el monitoreo.</li></ol>
+    <div class="row"><label class="btn primary" for="drDir" tabindex="0">${icon("folder", 16)} Elegir carpeta del dron</label><input type="file" id="drDir" webkitdirectory directory multiple hidden data-change="droneFiles">
+    <label class="btn" for="drFiles" tabindex="0">Elegir fotos</label><input type="file" id="drFiles" accept="image/jpeg,image/png" multiple hidden data-change="droneFiles"></div>
+    <div id="drOut" style="display:flex;flex-direction:column;gap:12px">${droneBody()}</div></div>
+    <div class="dlg-foot"><span class="small muted" id="drCount"></span><button class="btn" data-act="close">Cancelar</button><button class="btn primary" data-act="droneCreate" id="drGo" ${DR.items.length && !DR.busy ? "" : "disabled"}>Crear monitoreo y subir fotos</button></div>`, true);
+  droneRefresh();
+}
+function droneRefresh() {
+  const out = $("#drOut"); if (!out) return; out.innerHTML = droneBody();
+  const s = DR.items.length ? droneSummary() : null, go = $("#drGo"), c = $("#drCount");
+  if (go) go.disabled = DR.busy || !s || !s.sel.length;
+  if (c) c.textContent = s ? `${s.sel.length} foto(s) seleccionadas` : "";
+}
+async function droneLoad(fileList) {
+  const files = [...fileList].filter(f => /\.(jpe?g|png)$/i.test(f.name)).sort((a, b) => a.name.localeCompare(b.name));
+  DR.items = []; DR.status = "";
+  if (!files.length) { DR.status = "No se encontraron fotos JPG o PNG en lo que elegiste. Busca la carpeta DCIM del dron."; droneRefresh(); return; }
+  const lim = files.slice(0, 400); DR.busy = true;
+  for (let i = 0; i < lim.length; i++) { if (i % 10 === 0) { DR.status = `Leyendo datos del dron… ${i} de ${lim.length} fotos`; droneRefresh(); } DR.items.push(await readDroneMeta(lim[i])); }
+  DR.busy = false; DR.status = files.length > 400 ? "Se leyeron las primeras 400 fotos." : "";
+  const counts = {}; DR.items.forEach(i => { const d = isoDay(i.taken); counts[d] = (counts[d] || 0) + 1; });
+  DR.date = Object.keys(counts).sort((a, b) => counts[b] - counts[a] || b.localeCompare(a))[0];
+  droneRefresh();
+}
+async function shrinkImage(file, max = 2048) {
+  try {
+    const bmp = await createImageBitmap(file); const s = Math.min(1, max / Math.max(bmp.width, bmp.height));
+    if (s === 1 && file.size < 3e6) return file;
+    const c = document.createElement("canvas"); c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s); c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+    const b = await new Promise(r => c.toBlob(r, "image/jpeg", .85)); return b ? new File([b], file.name.replace(/\.\w+$/, ".jpg"), { type: "image/jpeg" }) : file;
+  } catch (e) { return file; }
+}
+async function droneCreate() {
+  const s = droneSummary(), p = proj(); if (!s || !s.sel.length || !p) return;
+  const n = ofP("flights").length + 1, id = uid("f");
+  const doc = { projectId: p.id, code: `${String(p.code || "OBR").split("-")[0]}-M${pad(n)}`, date: DR.date, time: hhmm(s.t0), zone: "Importado del dron", pilot: prof.name || "", drone: s.drone || "", dgac: "", altitude: s.alt != null ? Math.round(s.alt) : "", gsd: "", overlap: "", areaHa: s.areaHa != null ? +s.areaHa.toFixed(1) : (p.areaHa || ""), description: `Importado desde el dron${s.drone ? " " + s.drone : ""}: ${s.sel.length} fotos entre ${hhmm(s.t0)} y ${hhmm(s.t1)}.`, status: "proceso", qc: {}, photos: [], source: "dron", createdAt: todayISO() };
+  DR.busy = true; DR.status = "Creando el monitoreo…"; droneRefresh();
+  try { await put("flights", id, doc); } catch (e) { DR.busy = false; DR.status = "No se pudo crear el monitoreo."; droneRefresh(); return; }
+  const photos = []; let fails = 0;
+  for (let i = 0; i < s.sel.length; i++) {
+    const it = s.sel[i]; DR.status = `Subiendo foto ${i + 1} de ${s.sel.length}…`; droneRefresh();
+    try {
+      const f = DR.shrink ? await shrinkImage(it.file) : it.file; const r = await storeFile(f);
+      photos.push(Object.assign({ id: uid("ph"), zone: it.zone, name: it.name, desc: "", lat: it.lat, lng: it.lng, alt: it.relAlt ?? it.absAlt, taken: `${isoDay(it.taken)}T${hhmm(it.taken)}` }, r));
+    } catch (e) { fails++; }
+    if (photos.length && (photos.length % 5 === 0 || i === s.sel.length - 1)) { try { await patch("flights", id, { photos: [...photos] }); } catch (e) {} }
+  }
+  DR.busy = false; DR.items = []; DR.status = ""; UI.flight = id; closeModal(); location.hash = "#monitoreos"; render();
+  toast(`${doc.code} creado con ${photos.length} foto(s)${fails ? `; ${fails} no se pudieron subir` : ""}. Completa el número DGAC y el control de calidad para publicarlo.`);
+}
+const ytId = u => { const m = String(u || "").match(/(?:youtu\.be\/|[?&]v=|\/live\/|\/embed\/|\/shorts\/)([\w-]{11})/); return m ? m[1] : null; };
+function liveCard(p) {
+  const id = ytId(p.liveUrl), edit = can("flight.edit");
+  if (!id && !edit) return "";
+  return `<div class="card"><div class="card-head"><h2>${id ? `<span class="chip c-crit">En vivo</span> ` : ""}Transmisión en vivo del dron</h2>${id && edit ? `<button class="btn sm ghost" data-act="liveClear">Quitar transmisión</button>` : ""}</div>
+    ${id ? `<div style="position:relative;aspect-ratio:16/9;width:100%;max-width:760px;border-radius:8px;overflow:hidden;background:#000"><iframe src="https://www.youtube-nocookie.com/embed/${id}?autoplay=1&mute=1" title="Transmisión en vivo del dron" style="position:absolute;inset:0;width:100%;height:100%;border:0" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe></div>`
+      : `<p class="small muted" style="margin-bottom:8px">Desde la app del dron (por ejemplo DJI Fly o DJI Pilot 2) inicia una transmisión en <b>YouTube Live</b> como "No listado" y pega aquí el enlace. El cliente verá el vuelo en vivo dentro de su obra.</p>`}
+    ${edit && !id ? `<form data-form="live" class="row" style="flex-wrap:nowrap"><input type="text" name="url" placeholder="https://youtube.com/live/…" aria-label="Enlace de YouTube Live" required><button class="btn" type="submit">Mostrar en vivo</button></form>` : ""}</div>`;
+}
+
 /* ============ archivos ============ */
 async function saveFile(filename, blob) {
   if (S.downloads) { try { await S.downloads.save({ filename, data: blob }); toast("Listo: " + filename); return true; } catch (e) { toast(e && e.code === "declined" ? "Descarga cancelada." : "No se pudo descargar en esta vista."); return false; } }
@@ -1418,6 +1548,9 @@ const ACT = {
   enter: () => { prof.role = UI.accessRole; const n = $("#accName"); if (n) prof.name = n.value.trim(); lsSet("gsc.profile", prof); if (!location.hash) location.hash = "#inicio"; render(); },
   logout: async () => { if (S.sb) { await S.sb.auth.signOut(); resetSession(); UI.authView = "entrar"; UI.authMsg = ""; location.hash = ""; render(); return; } prof.role = null; lsSet("gsc.profile", prof); render(); },
   authView: el => { UI.authView = el.dataset.v; UI.authMsg = ""; render(); },
+  droneImport: () => { if (!DR.busy) { DR.items = []; DR.status = ""; } droneModal(); },
+  droneCreate: () => droneCreate(),
+  liveClear: async () => { const p = proj(); if (!p) return; await patch("projects", p.id, { liveUrl: "" }); toast("Transmisión quitada."); render(); },
   google: async () => { const { error } = await S.sb.auth.signInWithOAuth({ provider: "google", options: { redirectTo: location.origin + location.pathname } }); if (error) { UI.authOk = false; UI.authMsg = "El inicio con Google todavía no está activado."; render(); } },
   copyCode: async el => { const c = el.dataset.code; try { await navigator.clipboard.writeText(c); toast("Código copiado."); } catch (e) { toast("Código: " + c); } },
   loadUsers: async () => { const { data, error } = await S.sb.from("perfiles").select("id,nombre,cargo,empresa_id,rol").order("nombre"); if (error) return toast("No se pudo cargar la lista de usuarios."); UI.users = data || []; render(); },
@@ -1434,7 +1567,7 @@ const ACT = {
   gotoFlight: el => { const f = flightById(el.dataset.id); if (!f) return; UI.pid = f.projectId; UI.flight = f.id; closeModal(); location.hash = "#monitoreos"; render(); },
   flightStatus: async el => { await patch("flights", UI.flight, { status: el.dataset.s }); toast("Monitoreo enviado a control de calidad."); },
   publishFlight: async () => { const f = flightById(UI.flight); if (!f) return; if (QC.some(q => !(f.qc && f.qc[q[0]])) || !f.dgac || !(f.photos || []).length) { toast("Completa la lista de control, la autorización DGAC y las fotos."); return; } await patch("flights", f.id, { status: "publicado", publishedAt: todayISO() }); toast(`${f.code} publicado al cliente.`); },
-  lightbox: el => { const ph = photoOf(el.dataset.f, el.dataset.p), f = flightById(el.dataset.f); if (!ph) return; openModal(dlgHead(`${esc(ph.zone)} · ${esc(f?.code)}`, `${fmtD(f?.date)} · ${esc(ph.desc || ph.name || "")}`) + `<div class="dlg-body"><img src="${photoSrc(ph)}" alt="${esc(ph.zone)}" style="width:100%;border-radius:8px">${creditLine(ph, true)}</div><div class="dlg-foot"><button class="btn" data-act="dlPhoto" data-f="${esc(f.id)}" data-p="${esc(ph.id)}">${icon("download", 16)} Descargar</button></div>`, true); },
+  lightbox: el => { const ph = photoOf(el.dataset.f, el.dataset.p), f = flightById(el.dataset.f); if (!ph) return; openModal(dlgHead(`${esc(ph.zone)} · ${esc(f?.code)}`, `${fmtD(f?.date)} · ${esc(ph.desc || ph.name || "")}`) + `<div class="dlg-body"><img src="${photoSrc(ph)}" alt="${esc(ph.zone)}" style="width:100%;border-radius:8px">${creditLine(ph, true)}${photoGeo(ph)}</div><div class="dlg-foot"><button class="btn" data-act="dlPhoto" data-f="${esc(f.id)}" data-p="${esc(ph.id)}">${icon("download", 16)} Descargar</button></div>`, true); },
   dlPhoto: async el => { const ph = photoOf(el.dataset.f, el.dataset.p), f = flightById(el.dataset.f); const d = await urlToDataURL(photoSrc(ph)); if (!d) return toast("No se pudo leer la imagen."); const b = await (await fetch(d)).blob(); saveFile(`${f.code}_${(ph.zone || "foto").replace(/\s+/g, "-")}.${b.type.includes("png") ? "png" : "jpg"}`, b); },
   cmpFrom: el => { const f = flightById(el.dataset.id), fl = flightsOf(); const i = fl.findIndex(x => x.id === f.id); UI.cmp = cmpDefaults(); UI.cmp.after = f.id; UI.cmp.before = (fl[i - 1] || fl[i + 1] || f).id; location.hash = "#comparacion"; render(); },
   cmpMode: el => { UI.cmp.mode = el.dataset.m; render(); },
@@ -1508,6 +1641,12 @@ document.addEventListener("change", async e => {
   if (k === "cmpZone") { UI.cmp.zone = el.value; UI.cmp.savedId = null; render(); }
   if (k === "cmpType") UI.cmp.changeType = el.value;
   if (k === "qc") { const f = flightById(UI.flight); const qc = Object.assign({}, f.qc || {}, { [el.dataset.k]: el.checked }); await patch("flights", f.id, { qc }); }
+  if (k === "droneFiles") { droneLoad(el.files); return; }
+  if (k === "drSel") { DR.items[+el.dataset.k].sel = el.checked; droneRefresh(); return; }
+  if (k === "drZone") { DR.items[+el.dataset.k].zone = el.value; return; }
+  if (k === "drZoneAll") { DR.zoneAll = el.value; DR.items.forEach(i => { i.zone = el.value; }); droneRefresh(); return; }
+  if (k === "drDate") { DR.date = el.value; droneRefresh(); return; }
+  if (k === "drShrink") { DR.shrink = el.checked; return; }
   if (k === "setRol") { const { error } = await S.sb.from("perfiles").update({ rol: el.value }).eq("id", el.dataset.id); toast(error ? "No se pudo cambiar el rol." : "Rol actualizado."); if (!error) { const u = (UI.users || []).find(x => x.id === el.dataset.id); if (u) u.rol = el.value; } }
   if (k === "mvpCheck") { const m = S.data.meta.find(x => x.id === "mvp"); const checks = Object.assign({}, m?.checks || {}, { [el.dataset.k]: el.checked }); await put("meta", "mvp", { checks }); }
   if (k === "repKind") { UI.repKind = el.value; UI.preview = null; render(); }
@@ -1536,6 +1675,10 @@ document.addEventListener("submit", async e => {
       const { data, error } = await S.sb.auth.signUp({ email: v.email.trim(), password: v.password, options: { emailRedirectTo: location.origin + location.pathname, data: { nombre: v.nombre.trim(), cargo: v.rol === "supervisor" ? "Supervisor de obra" : "Ingeniero residente", rol: v.rol, empresa: v.empresa.trim(), codigo_empresa: codigo } } });
       if (error) { UI.authOk = false; UI.authMsg = /registered|exists/i.test(error.message) ? "Ese correo ya tiene una cuenta. Inicia sesión." : /password/i.test(error.message) ? "La contraseña no cumple los requisitos: usa al menos 8 caracteres." : "No se pudo crear la cuenta. Inténtalo de nuevo."; render(); return; }
       if (!data.session) { UI.authOk = true; UI.authMsg = "Cuenta creada. Te enviamos un correo para confirmarla; luego inicia sesión."; UI.authView = "entrar"; render(); }
+    }
+    if (k === "live") {
+      const id = ytId(v.url); if (!id) { toast("Ese enlace no parece de YouTube. Copia el enlace de la transmisión en vivo."); return; }
+      await patch("projects", UI.pid, { liveUrl: `https://www.youtube.com/watch?v=${id}` }); toast("Transmisión en vivo agregada a la obra."); render();
     }
     if (k === "completar") {
       const codigo = (v.codigo || "").trim().toUpperCase();
