@@ -89,6 +89,28 @@ Así funcionan los correos de confirmación de cuenta y de "olvidé mi contrase�
 
 Google suele tardar de unos días a algunas semanas en mostrarla. Solo se indexa la portada pública (inicio de sesión y descripción); el contenido de cada empresa es privado.
 
+## Conectar el dron
+
+En **Monitoreos con dron**, el equipo GeoSmart (operador, revisor o administrador) tiene dos opciones:
+
+**1. Conectar dron (importar un vuelo)**
+
+1. Conecta el dron a la computadora con su cable USB y enciéndelo, o inserta su tarjeta microSD en la computadora.
+2. Presiona **Conectar dron** y luego **Elegir carpeta del dron**. Elige la carpeta `DCIM` (o la carpeta del vuelo).
+3. La página lee de cada foto la fecha, la hora, el GPS, la altura y el modelo del dron. Muestra un resumen con el recorrido, la altura promedio y el área recorrida, y avisa si el vuelo está a más de 2 km de la obra.
+4. Elige la fecha del vuelo (si hay varias), marca las fotos y asígnales una zona. Presiona **Crear monitoreo y subir fotos**.
+5. El monitoreo queda "en proceso". Completa el número DGAC y el control de calidad para publicarlo al cliente.
+
+Las fotos se reducen a 2048 px antes de subir para no llenar el almacenamiento gratuito (se puede desactivar). Cada foto guarda sus coordenadas y se puede abrir en Google Maps.
+
+**2. Transmisión en vivo**
+
+1. En la app del dron (por ejemplo DJI Fly o DJI Pilot 2) elige transmitir en vivo a **YouTube**, con visibilidad **No listado**.
+2. Copia el enlace de la transmisión y pégalo en la tarjeta **Transmisión en vivo del dron** de la obra.
+3. El cliente de esa empresa verá el vuelo en vivo dentro de su panel. Al terminar, presiona **Quitar transmisión**.
+
+Un navegador no puede controlar el dron ni recibir su video directamente; por eso la conexión se hace con la memoria del dron (fotos) y con YouTube Live (video).
+
 ## Límites de esta versión
 
 - Las reglas de la base de datos impiden que una empresa vea los datos de otra. Algunas reglas finas (por ejemplo, que solo el revisor valide alertas) se controlan en la página, no en la base de datos.
